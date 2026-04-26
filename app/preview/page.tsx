@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Code2, Eye, Loader2 } from "lucide-react";
-import SandpackPane from "@/components/SandpackPane";
+import LivePreview from "@/components/LivePreview";
 import { PREVIEW_CHANNEL } from "@/lib/previewChannel";
 
 export default function PreviewPage() {
@@ -73,7 +73,7 @@ export default function PreviewPage() {
         </button>
       </header>
       <div className="flex-1 overflow-hidden">
-        <SandpackPane code={code} showCode={showCode} showPreview />
+        <LivePreview code={code} showCode={showCode} showPreview />
       </div>
     </div>
   );

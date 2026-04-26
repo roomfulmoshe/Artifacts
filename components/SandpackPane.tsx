@@ -39,9 +39,64 @@ function ensureTailwind(): Promise<void> {
   });
 }
 
+// Catches runtime errors from a streaming App. While the source keeps
+// changing, errors are likely due to in-flight partial code, so we retry
+// after a short delay. Once we see the SAME error message twice in a row
+// (the source landed on a real runtime bug), we stop retrying and surface
+// the error clearly instead of pulsing "rendering…" forever.
+class StreamBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null; lastMsg: string | null; settled: boolean }
+> {
+  state = { error: null as Error | null, lastMsg: null as string | null, settled: false };
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+  componentDidCatch(error: Error) {
+    const msg = String(error?.message ?? error);
+    if (msg === this.state.lastMsg) {
+      this.setState({ settled: true });
+      return;
+    }
+    setTimeout(
+      () => this.setState({ error: null, lastMsg: msg, settled: false }),
+      250
+    );
+  }
+  render() {
+    const { error, settled } = this.state;
+    if (error) {
+      return (
+        <div className="flex h-full w-full items-center justify-center bg-neutral-950 p-8 text-center">
+          <div className="space-y-2 max-w-md">
+            <div
+              className={
+                "text-sm " +
+                (settled
+                  ? "text-rose-300"
+                  : "text-neutral-300 animate-pulse")
+              }
+            >
+              {settled ? "Component crashed at runtime" : "rendering…"}
+            </div>
+            <div className="text-[11px] leading-snug text-neutral-500 break-words opacity-80">
+              {String(error.message).slice(0, 320)}
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return <>{this.props.children}</>;
+  }
+}
+
 ensureTailwind().then(() => {
   const root = createRoot(document.getElementById("root")!);
-  root.render(<App />);
+  root.render(
+    <StreamBoundary>
+      <App />
+    </StreamBoundary>
+  );
 });
 `;
 
@@ -55,85 +110,31 @@ const CUSTOM_SETUP = {
   },
 };
 
+// "immediate" recompile mode triggers a rebuild on every updateFile. Sandpack
+// internally guards each rebuild with `client.status === "done"`, so updates
+// that arrive while a build is in flight are dropped — the next call after
+// the build completes picks up the latest file state. This naturally
+// throttles to whatever cadence the bundler can keep up with.
+//
+// Do NOT use "delayed" here: that mode is a pure debounce (`clearTimeout`
+// on every update), so a steady stream of chunks <200ms apart keeps
+// resetting the timer and the preview never recompiles until the stream
+// ends.
 const SANDPACK_OPTIONS = {
-  recompileMode: "delayed" as const,
-  recompileDelay: 200,
+  recompileMode: "immediate" as const,
   classes: {
     "sp-wrapper": "!h-full",
     "sp-layout": "!h-full !rounded-none !border-0",
   },
 };
 
-function looksRunnable(code: string): boolean {
-  if (!/export\s+default/.test(code)) return false;
-  let depth = 0;
-  let parens = 0;
-  let brackets = 0;
-  let inLine = false;
-  let inBlock = false;
-  let inStr: string | null = null;
-  for (let i = 0; i < code.length; i++) {
-    const ch = code[i];
-    const next = code[i + 1];
-    if (inLine) {
-      if (ch === "\n") inLine = false;
-      continue;
-    }
-    if (inBlock) {
-      if (ch === "*" && next === "/") {
-        inBlock = false;
-        i++;
-      }
-      continue;
-    }
-    if (inStr) {
-      if (ch === "\\") {
-        i++;
-        continue;
-      }
-      if (ch === inStr) inStr = null;
-      continue;
-    }
-    if (ch === "/" && next === "/") {
-      inLine = true;
-      i++;
-      continue;
-    }
-    if (ch === "/" && next === "*") {
-      inBlock = true;
-      i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'" || ch === "`") {
-      inStr = ch;
-      continue;
-    }
-    if (ch === "{") depth++;
-    else if (ch === "}") {
-      depth--;
-      if (depth < 0) return false;
-    } else if (ch === "(") parens++;
-    else if (ch === ")") {
-      parens--;
-      if (parens < 0) return false;
-    } else if (ch === "[") brackets++;
-    else if (ch === "]") {
-      brackets--;
-      if (brackets < 0) return false;
-    }
-  }
-  return (
-    depth === 0 && parens === 0 && brackets === 0 && !inStr && !inBlock
-  );
-}
-
 function CodeSync({ code }: { code: string }) {
   const { sandpack } = useSandpack();
-  // Update the editor on every chunk, but only request a preview rebuild
-  // when the code looks plausibly parseable. Sandpack's recompileDelay
-  // additionally debounces the rebuilds.
+  // Caller (Workspace) has already passed `code` through repairCode, so it is
+  // guaranteed to be parseable. Always trigger a preview rebuild — Sandpack's
+  // recompileDelay debounces multiple rapid updates from the stream.
   useEffect(() => {
-    sandpack.updateFile("/App.tsx", code, looksRunnable(code));
+    sandpack.updateFile("/App.tsx", code, true);
   }, [code, sandpack]);
   return null;
 }

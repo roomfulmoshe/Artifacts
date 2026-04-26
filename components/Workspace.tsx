@@ -19,9 +19,17 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
 } from "lucide-react";
-import SandpackPane from "@/components/SandpackPane";
+import LivePreview from "@/components/LivePreview";
 import { extractJsx } from "@/lib/extractJsx";
+import { repairCode } from "@/lib/repairCode";
 import { PREVIEW_CHANNEL } from "@/lib/previewChannel";
+
+type ModelChoice = "claude-haiku-4-5" | "lmstudio-gemma";
+
+const MODEL_OPTIONS: { value: ModelChoice; label: string; hint: string }[] = [
+  { value: "claude-haiku-4-5", label: "Claude Haiku 4.5", hint: "cloud · cheap · strong at code" },
+  { value: "lmstudio-gemma", label: "Gemma (LM Studio)", hint: "local · free" },
+];
 
 const DEFAULT_APP = `export default function App() {
   return (
@@ -43,8 +51,19 @@ const MAX_CHAT_WIDTH = 720;
 const DEFAULT_CHAT_WIDTH = 420;
 
 export default function Workspace() {
+  const [model, setModel] = useState<ModelChoice>("claude-haiku-4-5");
+  const modelRef = useRef(model);
+  modelRef.current = model;
+
   const { messages, input, handleInputChange, handleSubmit, isLoading } =
     useChat({ api: "/api/chat" });
+
+  const onSubmit = useCallback(
+    (e: React.FormEvent<HTMLFormElement>) => {
+      handleSubmit(e, { body: { model: modelRef.current } });
+    },
+    [handleSubmit]
+  );
 
   const [showChat, setShowChat] = useState(true);
   const [showCode, setShowCode] = useState(true);
@@ -57,7 +76,7 @@ export default function Workspace() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
 
-  const latestCode = useMemo(() => {
+  const latestRawCode = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i];
       if (m.role !== "assistant") continue;
@@ -67,7 +86,20 @@ export default function Workspace() {
     return null;
   }, [messages]);
 
-  const appCode = latestCode ?? DEFAULT_APP;
+  // Pipe each streamed chunk through repairCode so Sandpack always receives
+  // parseable source. If a chunk lands in a state the repairer can't salvage,
+  // hold the previous repaired version (sticky last-good frame).
+  const lastGoodRef = useRef<string | null>(null);
+  const appCode = useMemo(() => {
+    if (!latestRawCode) return DEFAULT_APP;
+    const repaired = repairCode(latestRawCode);
+    if (repaired) {
+      lastGoodRef.current = repaired;
+      return repaired;
+    }
+    return lastGoodRef.current ?? DEFAULT_APP;
+  }, [latestRawCode]);
+
   const appCodeRef = useRef(appCode);
   appCodeRef.current = appCode;
 
@@ -158,9 +190,22 @@ export default function Workspace() {
           >
             <header className="flex items-center gap-2 border-b border-neutral-800 px-5 py-3">
               <Sparkles className="h-4 w-4 text-indigo-400" />
-              <h1 className="text-sm font-medium tracking-wide">
-                Artifacts · LM Studio
-              </h1>
+              <h1 className="text-sm font-medium tracking-wide">Artifacts</h1>
+              <select
+                value={model}
+                onChange={(e) => setModel(e.target.value as ModelChoice)}
+                disabled={isLoading}
+                title={
+                  MODEL_OPTIONS.find((m) => m.value === model)?.hint ?? ""
+                }
+                className="ml-2 rounded-md border border-neutral-800 bg-neutral-900 px-2 py-1 text-xs text-neutral-200 outline-none transition hover:border-neutral-700 focus:border-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {MODEL_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
               {isLoading && (
                 <span className="ml-auto flex items-center gap-1 text-xs text-neutral-400">
                   <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-indigo-400" />
@@ -187,13 +232,14 @@ export default function Workspace() {
             </div>
 
             <form
-              onSubmit={handleSubmit}
+              onSubmit={onSubmit}
               className="sticky bottom-0 border-t border-neutral-800 bg-neutral-950/90 p-4 backdrop-blur"
             >
               <div className="flex items-end gap-2 rounded-xl border border-neutral-800 bg-neutral-900 px-3 py-2 focus-within:border-indigo-500">
                 <textarea
                   value={input}
                   onChange={handleInputChange}
+                  disabled={isLoading}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && !e.shiftKey) {
                       e.preventDefault();
@@ -201,8 +247,10 @@ export default function Workspace() {
                     }
                   }}
                   rows={1}
-                  placeholder="Describe a component…"
-                  className="max-h-40 flex-1 resize-none bg-transparent py-1.5 text-sm outline-none placeholder:text-neutral-500"
+                  placeholder={
+                    isLoading ? "streaming response…" : "Describe a component…"
+                  }
+                  className="max-h-40 flex-1 resize-none bg-transparent py-1.5 text-sm outline-none placeholder:text-neutral-500 disabled:cursor-not-allowed disabled:opacity-60"
                 />
                 <button
                   type="submit"
@@ -249,9 +297,9 @@ export default function Workspace() {
           <h2 className="ml-2 text-sm font-medium text-neutral-300">
             Live Preview
           </h2>
-          {latestCode && (
+          {latestRawCode && (
             <span className="ml-2 text-xs text-neutral-500">
-              {latestCode.length.toLocaleString()} chars
+              {latestRawCode.length.toLocaleString()} chars
               {isLoading && (
                 <span className="ml-2 text-indigo-400">· streaming</span>
               )}
@@ -285,8 +333,10 @@ export default function Workspace() {
           </div>
         </header>
         <div className="flex-1 overflow-hidden">
-          <SandpackPane
+          <LivePreview
             code={appCode}
+            rawCode={latestRawCode ?? ""}
+            isStreaming={isLoading}
             showCode={showCode}
             showPreview={showPreview}
           />
